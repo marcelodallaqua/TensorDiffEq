@@ -7,6 +7,7 @@ from .plotting import *
 from .fit import *
 from tqdm.auto import tqdm, trange
 from .output import print_screen
+import math
 
 
 class CollocationSolverND:
@@ -14,6 +15,7 @@ class CollocationSolverND:
         self.assimilate = assimilate
         self.verbose = verbose
         self.losses = []
+        self.tape = None
 
     def compile(self, layer_sizes, f_model, domain, bcs, Adaptive_type=0,
                 dict_adaptive=None, init_weights=None, g=None, dist=False):
@@ -95,8 +97,6 @@ class CollocationSolverND:
             self.dict_adaptive = dict_adaptive
             self.lambdas, self.lambdas_map = initialize_weights_loss(init_weights, dict_adaptive)
 
-
-
     def compile_data(self, x, t, y):
         if not self.assimilate:
             raise Exception(
@@ -108,70 +108,54 @@ class CollocationSolverND:
 
     def update_loss(self):
         loss_epoch = {}
+        ntk = {}
+        loss_total = 0.0
+        traces = 0.0
 
-        #####################################
-        # BOUNDARIES and INIT conditions
-        #####################################
         # Check if adaptive is allowed
         if self.isAdaptive:
             if any(self.dict_adaptive['BCs']):
                 idx_lambda_bcs = self.lambdas_map['bcs'][0]
 
-        loss_bcs = 0.
+        #####################################
+        # BOUNDARIES and INIT conditions
+        #####################################
         for counter_bc, bc in enumerate(self.bcs):
-            loss_bc = 0.
+            if bc.isPeriodic:
+                raise Exception('Boundary condition type is not acceptable')
+            # initial BCs, including adaptive model
+            elif bc.isInit:
+                u = self.u_model(bc.input) - bc.val
+
+            elif bc.isNeumann:
+                raise Exception('Boundary condition type is not acceptable')
+
+            elif bc.isDirichlect:
+                u = self.u_model(bc.input) - bc.val
+            else:
+                raise Exception('Boundary condition type is not acceptable')
+
+            # compute losses
             # Check if the current BS is adaptive
             if self.isAdaptive:
                 isBC_adaptive = self.dict_adaptive["BCs"][counter_bc]
             else:
                 isBC_adaptive = False
 
-            # Periodic BC iteration for all components of deriv_model
-            if bc.isPeriodic:
-                if isBC_adaptive:
-                    # TODO: include Adapative Periodic Boundaries Conditions
-                    raise Exception('TensorDiffEq is currently not accepting Adapative Periodic Boundaries Conditions')
-                else:
-                    # TODO: check if we need to save all individual losses
-                    for i, dim in enumerate(bc.var):
-                        for j, lst in enumerate(dim):
-                            for k, tup in enumerate(lst):
-                                upper = bc.u_x_model(self.u_model, bc.upper[i])[j][k]
-                                lower = bc.u_x_model(self.u_model, bc.lower[i])[j][k]
-                                msq = MSE(upper, lower)
-                                loss_bc = tf.math.add(loss_bc, msq)
-            # initial BCs, including adaptive model
-            elif bc.isInit:
-                if isBC_adaptive:
-                    loss_bc = MSE(self.u_model(bc.input), bc.val, self.lambdas[idx_lambda_bcs], self.weight_outside_sum)
-                    idx_lambda_bcs += 1
-                else:
-                    loss_bc = MSE(self.u_model(bc.input), bc.val)
-            # BC types are added
-            elif bc.isNeumann:
-                if isBC_adaptive:
-                    #TODO: include Adapative Neumann Boundaries Conditions
-                    raise Exception('TensorDiffEq is currently not accepting Adapative Neumann Boundaries Conditions')
-                else:
-                    for i, dim in enumerate(bc.var):
-                        for j, lst in enumerate(dim):
-                            for k, tup in enumerate(lst):
-                                target = tf.cast(bc.u_x_model(self.u_model, bc.input[i])[j][k], dtype=tf.float32)
-                                msq = MSE(bc.val, target)
-                                loss_bc = tf.math.add(loss_bc, msq)
-
-            elif bc.isDirichlect:
-                if isBC_adaptive:
-                    loss_bc = MSE(self.u_model(bc.input), bc.val, self.lambdas[idx_lambda_bcs], self.weight_outside_sum)
-                    idx_lambda_bcs += 1
-                else:
-                    loss_bc = MSE(self.u_model(bc.input), bc.val)
-
+            if isBC_adaptive:
+                loss_bc = MSE(u, 0., self.lambdas[idx_lambda_bcs], self.weight_outside_sum)
+                idx_lambda_bcs += 1
             else:
-                raise Exception('Boundary condition type is not acceptable')
+                loss_bc = MSE(u, 0.)
 
+            loss_total = loss_total + loss_bc
             loss_epoch[f'BC_{counter_bc}'] = loss_bc
-            loss_bcs = tf.add(loss_bcs, loss_bc)
+
+            ## if NTK
+            if self.Adaptive_type == 3:
+                trace = self.ntk_jacobian(u)
+                ntk[f'BC_{counter_bc}'] = {'trace': trace}
+                traces = traces + trace
 
         #####################################
         # Residual Equations
@@ -185,7 +169,6 @@ class CollocationSolverND:
 
         loss_res = 0.
         for counter_res, f_u_pred in enumerate(f_u_preds):
-            # Check if the current Residual is adaptive
             if self.isAdaptive:
                 isRes_adaptive = self.dict_adaptive["residual"][counter_res]
                 if isRes_adaptive:
@@ -201,18 +184,70 @@ class CollocationSolverND:
                 loss_r = MSE(f_u_pred, constant(0.0))
 
             loss_epoch[f'Residual_{counter_res}'] = loss_r
-            loss_res = tf.math.add(loss_r, loss_res)
+            loss_total = loss_total + loss_r
 
-        loss_total = tf.math.add(loss_res, loss_bcs)
+            if self.Adaptive_type == 3:
+                trace = self.ntk_jacobian(f_u_pred)
+                ntk[f'Residual_{counter_res}'] = {'trace': trace}
+                traces = traces + trace
 
-        loss_epoch['Total Loss'] = np.asarray(loss_total)
+        if self.Adaptive_type == 3:
+            loss_total = 0.
+            for item in ntk:
+                lambda_ntk = traces / ntk[item]['trace']
+                ntk[item].update({'lambda': lambda_ntk})
+                loss_epoch[item] = lambda_ntk * loss_epoch[item]
+                loss_total = loss_total + loss_epoch[item]
+
+        loss_epoch['Total Loss'] = loss_total
         self.losses.append(loss_epoch)
 
         return loss_total
 
+    def ntk_jacobian(self, y):
+        #
+        with self.tape.stop_recording():
+            jac = self.tape.jacobian(y, self.variables)
+            trace = trace_ntk(jac)
+        return trace
+
+    def ntk_jacobian2(self, y):
+        # check available memory
+        import psutil
+        memory = dict(psutil.virtual_memory()._asdict())
+        # you can calculate percentage of available memory (bytes)
+        available = psutil.virtual_memory().available
+
+        # every element in the matrix uses 8 bytes (64 bits)
+        n_rows = y.shape[0]
+        n_col = np.sum([np.prod(v.get_shape().as_list()) for v in self.variables])
+        max_n_rows = available * .05 / n_col / 8.
+
+        if n_rows >= max_n_rows:
+            a = 0
+
+        # fix the maximum number of lines
+        chunk = 512
+        n_chunks = 1
+        if n_rows > chunk:
+            n_chunks = math.ceil(n_rows / chunk)
+        chunk_size = np.minimum(n_rows, chunk)
+
+        trace = 0.
+        for n in range(n_chunks):
+            y_chunk = y[n * chunk_size:(n + 1) * chunk_size, :]
+            with self.tape.stop_recording():
+                start_time = time.time()
+                jac = self.tape.jacobian(y_chunk, self.variables)
+                print('---- Elapse time %s' % (time.time() - start_time))
+                trace_chunk = trace_ntk(jac)
+                trace = trace + trace_chunk
+        return trace
+
     # @tf.function
     def grad(self):
         with tf.GradientTape() as tape:
+            self.tape = tape
             loss_value = self.update_loss()
             grads = tape.gradient(loss_value, self.variables)
         return loss_value, grads
