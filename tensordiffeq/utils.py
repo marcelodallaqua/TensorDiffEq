@@ -113,3 +113,23 @@ def initialize_weights_loss(init_weights, adaptive_map):
                 counter += 1
         lambdas_map[key.lower()] = list
     return lambdas, lambdas_map
+
+
+def trace_ntk(jacobian):
+    # Number of layers on the NN
+    n_layers = len(jacobian)
+
+    # Number of samples (collocation points)
+    n_points_i = jacobian[0].shape[0]
+
+    # A vector that will contains all the elements of the
+    # main diagonal of the NKT
+    diag_n = np.zeros((n_points_i, 1))
+
+    for n in tf.range(n_layers):
+        grad = tf.reshape(jacobian[n], [n_points_i, -1])
+        grad_grad = grad * grad
+        dot_grad = tf.math.reduce_sum(grad_grad, axis=1, keepdims=True)
+        diag_n = diag_n + dot_grad
+    trace = tf.math.reduce_sum(diag_n).numpy()
+    return trace
