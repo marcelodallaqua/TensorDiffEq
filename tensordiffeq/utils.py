@@ -113,3 +113,4 @@ def initialize_weights_loss(init_weights, adaptive_map):
                 counter += 1
         lambdas_map[key.lower()] = list
     return lambdas, lambdas_map
+

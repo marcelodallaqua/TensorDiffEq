@@ -20,5 +20,6 @@ __all__ = [
     "boundaries",
     "domains",
     "fit",
-    "sampling"
+    "sampling",
+    "utils_lbfgs"
 ]

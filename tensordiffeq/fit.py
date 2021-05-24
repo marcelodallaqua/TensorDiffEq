@@ -10,6 +10,7 @@ import os
 from tqdm.auto import tqdm, trange
 from random import random, randint
 import sys
+from .utils_lbfgs import *
 
 os.environ["TF_GPU_THREAD_MODE"] = "gpu_private"
 
@@ -62,9 +63,16 @@ def fit(obj, tf_iter=0, newton_iter=0, batch_sz=None, newton_eager=True):
         if newton_eager:
             print("Executing eager-mode L-BFGS")
             loss_and_flat_grad = obj.get_loss_and_flat_grad()
-            _, _, _, best_w, min_loss, best_epoch = eager_lbfgs(loss_and_flat_grad,
-                                                                get_weights(obj.u_model),
-                                                                Struct(), maxIter=newton_iter, learningRate=0.8)
+            # _, _, _, best_w, min_loss, best_epoch = eager_lbfgs(loss_and_flat_grad,
+            #                                                     get_weights(obj.u_model),
+            #                                                     Struct(), maxIter=newton_iter, learningRate=0.8)
+
+            tfp_lbfgs = optimize_with_lbfgs(loss_and_flat_grad, get_weights(obj.u_model), maxiter=newton_iter)
+            results = run(tfp_lbfgs)
+
+            best_w = results.position
+            min_loss = results.objective_value
+            best_epoch = results.num_iterations
 
             # saving best Model
             best_model = obj.u_model
@@ -89,7 +97,6 @@ def fit(obj, tf_iter=0, newton_iter=0, batch_sz=None, newton_eager=True):
             lbfgs_train(obj, newton_iter)
 
     # tf.profiler.experimental.stop()
-
 
     # Saving the best overall method
     if obj.min_loss['adam'] <= obj.min_loss['l-bfgs']:
